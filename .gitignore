@@ -1,0 +1,42 @@
+# Build output
+build/
+build-*/
+out/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+compile_commands.json
+
+# Editor and tooling state
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+*.swp
+*~
+
+# Object and binary output
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+
+# Runtime artifacts produced by exercising the tools
+*.journal
+*.snapshot
+*.snapshot.staging
+store.lock
+fabric-store/
+fr-scratch-*/

@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+# Summon Software Labs -- Fabric Reconciliation
+#
+# Consumed as:
+#   find_package(FabricReconciliation CONFIG REQUIRED)
+#   target_link_libraries(app PRIVATE SummonLabs::FabricReconciliation::fabric_reconciliation)
+
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+
+include("${CMAKE_CURRENT_LIST_DIR}/FabricReconciliationTargets.cmake")
+
+check_required_components(FabricReconciliation)
