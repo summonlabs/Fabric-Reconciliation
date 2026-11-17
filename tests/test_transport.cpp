@@ -17,6 +17,16 @@
 #include "summon/fabric_reconciliation/server.hpp"
 #include "summon/fabric_reconciliation/wire.hpp"
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
+
 namespace fr = summon::fabric_reconciliation;
 using namespace frtest;
 
@@ -362,4 +372,68 @@ FR_TEST(service, oversized_wire_payload_is_refused_by_the_service) {
   FR_CHECK(!status.ok());
   client.Close();
   FR_CHECK_STATUS_OK(server->Stop());
+}
+
+FR_TEST(service, a_second_server_cannot_take_a_listening_port) {
+  ScratchDirectory scratch{"service-port"};
+  std::unique_ptr<fr::ReconciliationEngine> engine = OpenEngine(scratch.path());
+  fr::ServerOptions options;
+  options.bind_address = "127.0.0.1";
+  options.port = 0;
+  std::unique_ptr<fr::ReconciliationServer> first;
+  FR_CHECK_STATUS_OK(fr::ReconciliationServer::Start(options, *engine, first));
+  if (!first) return;
+  fr::ServerOptions taken = options;
+  taken.port = first->port();
+  std::unique_ptr<fr::ReconciliationServer> second;
+  // Two reconcilers must never share one listening port: the second start fails.
+  const bool second_started = fr::ReconciliationServer::Start(taken, *engine, second).ok();
+  if (second_started && second) {
+    (void)second->Stop();
+  }
+  FR_CHECK_STATUS_OK(first->Stop());
+  FR_CHECK(!second_started);
+}
+
+FR_TEST(service, finished_sessions_are_released_while_the_server_runs) {
+  ScratchDirectory scratch{"service-finished"};
+  std::unique_ptr<fr::ReconciliationEngine> engine = OpenEngine(scratch.path());
+  fr::ServerOptions options;
+  options.bind_address = "127.0.0.1";
+  options.port = 0;
+  options.max_sessions = 16;
+  std::unique_ptr<fr::ReconciliationServer> server;
+  FR_CHECK_STATUS_OK(fr::ReconciliationServer::Start(options, *engine, server));
+  const auto session = [&server]() {
+    fr::ReconciliationClient client;
+    const bool connected = fr::ReconciliationClient::Connect("127.0.0.1", server->port(),
+                                                             fr::RuntimeLimits{}, client)
+                               .ok();
+    client.Close();
+    return connected;
+  };
+  FR_CHECK(session());
+#if defined(_WIN32)
+  DWORD before = 0;
+  ::GetProcessHandleCount(::GetCurrentProcess(), &before);
+#endif
+  int served = 0;
+  for (int index = 0; index < 100; ++index) {
+    if (session()) {
+      ++served;
+    }
+  }
+#if defined(_WIN32)
+  DWORD after = 0;
+  ::GetProcessHandleCount(::GetCurrentProcess(), &after);
+#endif
+  FR_CHECK_STATUS_OK(server->Stop());
+  // The session limit counts live sessions: a closed session gives its slot
+  // back, so far more sessions than max_sessions are served one after another.
+  FR_CHECK_EQ(served, 100);
+#if defined(_WIN32)
+  // A finished session's thread that is never joined keeps its handle, so the
+  // count would grow by about one per session.
+  FR_CHECK(after < before + 64);
+#endif
 }

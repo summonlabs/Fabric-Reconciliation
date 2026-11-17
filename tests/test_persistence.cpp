@@ -8,12 +8,14 @@
 #include "test_helpers.hpp"
 #include "test_support.hpp"
 
+#include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "summon/fabric_reconciliation/journal.hpp"
@@ -556,4 +558,44 @@ FR_TEST(store, durable_state_is_rejected_when_the_store_identity_mismatches) {
   const fr::Status status = fr::ReconciliationEngine::Open(options, engine);
   FR_CHECK(!status.ok());
   FR_CHECK(status.reason() == fr::ReasonCode::SnapshotStoreMismatch);
+}
+
+FR_TEST(snapshot, a_replacement_waits_for_a_reader_to_close) {
+  ScratchDirectory scratch{"snapshot-reader"};
+  const std::filesystem::path path = scratch.child("store.snapshot");
+  fr::SnapshotHeader header;
+  header.format_version = fr::kSnapshotFormatVersion;
+  header.header_bytes = static_cast<std::uint32_t>(fr::kSnapshotHeaderBytes);
+  header.store = fr::StoreId::Generate();
+  header.watermark = fr::RecordSequence(1);
+  header.epoch = fr::CoordinatorEpoch(1);
+  header.created_unix_ms = 1;
+  const std::string first = "first payload";
+  header.payload_len = first.size();
+  FR_CHECK_STATUS_OK(fr::WriteSnapshotAtomic(path, header, first));
+  const std::string second = "second payload";
+  fr::SnapshotHeader next = header;
+  next.watermark = fr::RecordSequence(2);
+  next.payload_len = second.size();
+  bool reader_opened = false;
+  bool written = false;
+  {
+    // Another tool reading the store (an inspection, a scan) holds the snapshot
+    // open while it is replaced, and closes it shortly after.
+    std::ifstream reader(path, std::ios::binary);
+    reader_opened = reader.is_open();
+    std::thread writer([&path, &next, &second, &written] {
+      written = fr::WriteSnapshotAtomic(path, next, second).ok();
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    reader.close();
+    writer.join();
+  }
+  FR_CHECK(reader_opened);
+  // The replacement waits for the reader instead of failing the snapshot.
+  FR_CHECK(written);
+  fr::SnapshotHeader read_header;
+  std::string read_payload;
+  FR_CHECK_STATUS_OK(fr::ReadSnapshot(path, fr::RuntimeLimits{}, read_header, read_payload));
+  FR_CHECK_EQ(read_payload, second);
 }

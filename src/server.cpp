@@ -34,6 +34,9 @@ struct SessionState {
   std::atomic<std::uint64_t> requests{0};
   std::atomic<std::uint64_t> rejected{0};
   std::atomic<bool> live{false};
+  /// The thread serving this session, and whether it has returned.
+  std::thread worker;
+  std::atomic<bool> finished{false};
 };
 
 std::string TextResponse(const std::string& body) { return body; }
@@ -63,7 +66,6 @@ struct ReconciliationServer::Impl {
   net::Socket listener;
   net::WakeupChannel wake;
   std::thread accept_thread;
-  std::vector<std::thread> workers;
   mutable std::mutex mutex;
   std::vector<std::shared_ptr<SessionState>> sessions;
   std::atomic<bool> stopping{false};
@@ -689,10 +691,29 @@ Status ReconciliationServer::Start(const ServerOptions& options, ReconciliationE
         }
         continue;
       }
+      // Finished sessions were kept until Stop and counted against
+      // max_sessions, so after max_sessions connections in the server's
+      // lifetime every new client was refused, and a long-running server held
+      // one thread for every connection. Finished sessions are dropped here
+      // and their threads joined below.
+      std::vector<std::shared_ptr<SessionState>> finished;
       std::size_t active = 0;
       {
         std::lock_guard<std::mutex> guard(impl.mutex);
+        for (auto it = impl.sessions.begin(); it != impl.sessions.end();) {
+          if ((*it)->finished.load()) {
+            finished.push_back(std::move(*it));
+            it = impl.sessions.erase(it);
+          } else {
+            ++it;
+          }
+        }
         active = impl.sessions.size();
+      }
+      for (const auto& done : finished) {
+        if (done->worker.joinable()) {
+          done->worker.join();
+        }
       }
       if (active >= impl.options.max_sessions) {
         ++impl.rejected;
@@ -708,11 +729,16 @@ Status ReconciliationServer::Start(const ServerOptions& options, ReconciliationE
       }
       session->peer = net::DescribePeer(session->socket);
       {
+        // The session and its thread are registered under one lock, so Stop
+        // never sees a session it cannot join.
         std::lock_guard<std::mutex> guard(impl.mutex);
         impl.sessions.push_back(session);
+        session->worker = std::thread([&impl, session]() {
+          impl.ServeSession(session);
+          session->finished.store(true);
+        });
       }
       ++impl.accepted;
-      impl.workers.emplace_back([&impl, session]() { impl.ServeSession(session); });
       if (impl.options.single_session) {
         break;
       }
@@ -751,12 +777,24 @@ Status ReconciliationServer::Stop() {
   if (impl.accept_thread.joinable()) {
     impl.accept_thread.join();
   }
-  for (std::thread& worker : impl.workers) {
-    if (worker.joinable()) {
-      worker.join();
+  // The accept thread has stopped, so no session is registered any more. A
+  // session it registered after the release above was never released, and
+  // joining its thread would wait for a read that never ends, so every session
+  // is released again before the joins.
+  std::vector<std::shared_ptr<SessionState>> remaining;
+  {
+    std::lock_guard<std::mutex> guard(impl.mutex);
+    remaining = impl.sessions;
+  }
+  for (const auto& session : remaining) {
+    session->wake.Signal();
+    session->socket.Shutdown();
+  }
+  for (const auto& session : remaining) {
+    if (session->worker.joinable()) {
+      session->worker.join();
     }
   }
-  impl.workers.clear();
   {
     std::lock_guard<std::mutex> guard(impl.mutex);
     for (const auto& session : impl.sessions) {

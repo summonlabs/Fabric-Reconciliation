@@ -108,7 +108,10 @@ endif()
 
 if(FABRIC_RECONCILIATION_ENABLE_SANITIZERS)
   if(MSVC)
-    target_compile_options(fabric_reconciliation PUBLIC /fsanitize=address)
+    # Debug information is required: without it MSVC warns C5072, which /WX
+    # turns into an error, so the sanitized build did not compile.
+    target_compile_options(fabric_reconciliation PUBLIC /fsanitize=address /Zi)
+    target_link_options(fabric_reconciliation PUBLIC /INCREMENTAL:NO /DEBUG)
   else()
     target_compile_options(fabric_reconciliation PUBLIC -fsanitize=address,undefined -fno-omit-frame-pointer)
     target_link_options(fabric_reconciliation PUBLIC -fsanitize=address,undefined)
